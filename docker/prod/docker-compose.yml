@@ -1,0 +1,93 @@
+# Production stack.  Run from the repo root:
+#   docker compose -f docker/prod/docker-compose.yml up -d
+#
+# Differences from nonprod: no code mount, no --reload, dev deps stripped,
+# non-root, migrations run once as their own service instead of racing across
+# web workers, db and redis unpublished, everything restarts on failure.
+name: munim-prod
+
+x-app: &app
+  build:
+    context: ../..
+    dockerfile: docker/prod/Dockerfile
+  image: munim:prod
+  env_file: ../../.env
+  environment:
+    DJANGO_DEBUG: "0"
+    # Listed here, not left to .env: entries under `environment` outbid
+    # env_file, so a dev-only secret sitting in .env cannot leak into prod.
+    DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY}
+    # Required here rather than left to fail lazily: settings.py deliberately lets a
+    # keyless app boot so makemigrations and the tests can run, which in prod would
+    # mean discovering the omission the first time a merchant saves their credentials.
+    MUNIM_FIELD_ENCRYPTION_KEYS: ${MUNIM_FIELD_ENCRYPTION_KEYS:?set MUNIM_FIELD_ENCRYPTION_KEYS}
+    DATABASE_URL: postgres://munim:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/munim
+    REDIS_URL: redis://redis:6379/0
+  restart: unless-stopped
+  depends_on:
+    db: {condition: service_healthy}
+    redis: {condition: service_started}
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: munim
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: munim
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U munim"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    # No published port: only the compose network reaches the database.
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save 60 1 --appendonly no
+    restart: unless-stopped
+    volumes: ["redisdata:/data"]
+
+  # One-shot. web/worker/beat wait for this to exit 0, so four uvicorn workers
+  # never run makemigrations-era DDL against each other.
+  migrate:
+    <<: *app
+    restart: "no"
+    command: python manage.py migrate --noinput
+
+  web:
+    <<: *app
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_started}
+      migrate: {condition: service_completed_successfully}
+    ports: ["${WEB_PORT:-8000}:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/audit/verify', timeout=5).status==200 else 1)"]
+      interval: 15s
+      timeout: 6s
+      retries: 3
+      start_period: 20s
+
+  worker:
+    <<: *app
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_started}
+      migrate: {condition: service_completed_successfully}
+    command: celery -A config worker -l info --concurrency 4
+
+  beat:
+    <<: *app
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_started}
+      migrate: {condition: service_completed_successfully}
+    command: celery -A config beat -l info
+
+volumes:
+  pgdata:
+  redisdata:

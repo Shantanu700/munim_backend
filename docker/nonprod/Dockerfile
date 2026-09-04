@@ -1,11 +1,9 @@
 FROM python:3.13-slim
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-ARG USER
+ARG USER=munim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gdal-bin \
-    libgdal-dev \
     curl \
     ca-certificates \
     git \
@@ -13,12 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /backend
+WORKDIR /app
 
 RUN useradd -ms /bin/bash $USER && \
     usermod -aG root $USER && \
-    chown -R $USER:$USER /backend && \
-    chmod -R 755 /backend
+    chown -R $USER:$USER /app && \
+    chmod -R 755 /app
 
 RUN chmod -R g+w /usr/local/
 
@@ -44,3 +42,4 @@ RUN sh -c "$(curl -L https://github.com/deluan/zsh-in-docker/releases/download/v
     -p https://github.com/zsh-users/zsh-completions \
     -a 'bindkey "\$terminfo[kcuu1]" history-substring-search-up' \
     -a 'bindkey "\$terminfo[kcud1]" history-substring-search-down'
+

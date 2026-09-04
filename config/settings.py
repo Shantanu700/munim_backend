@@ -10,24 +10,87 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+import base64
+import binascii
 import os
-
 from pathlib import Path
+from urllib.parse import urlparse
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
+from django.core.exceptions import ImproperlyConfigured
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = "django-insecure-d#85asx!ojvok8yfs+f&206+2=w2i0!vxjg7zgqsy#f30&v+i$"
 
-# SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
 ALLOWED_HOSTS = ["*"]
+
+PUBLIC_HOST = os.environ["PUBLIC_HOST"]
+
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+
+FIELD_ENCRYPTION_KEYS = [
+    k.strip()
+    for k in os.environ.get("MUNIM_FIELD_ENCRYPTION_KEYS", "").split(",")
+    if k.strip()
+]
+
+
+def _parse_mandate_keys(raw: str) -> dict[str, bytes]:
+    """Ed25519 mandate signing keys, as "kid:base64seed" pairs.
+
+    Comma-separated and ACTIVE FIRST: the first kid signs, every kid verifies.
+    Same shape and same two-deploy rotation story as FIELD_ENCRYPTION_KEYS above
+    (add the new key in front; reissue; drop the old one) -- and note that
+    MANDATE_ACTIVE_KID is DERIVED from that order rather than configured beside
+    it. Two settings that must agree are two settings that can disagree, and the
+    failure mode there is signing with a key nobody can verify.
+
+    The values are the 32 RAW seed bytes, not the base64 text: jws.sign does
+    SigningKey(seed), and `mandate_keygen --rotate` re-encodes these values with
+    base64.b64encode, which only works on bytes. Keeping the text here would
+    raise out of PyNaCl at the first signature.
+
+    Deliberately os.environ.get and not os.environ[...], for the reason spelled
+    out above FIELD_ENCRYPTION_KEYS: makemigrations, `migrate` against an empty
+    database and the whole test suite have to run on a checkout with no key, and
+    jws._keys() raises its own pointed error the moment something actually signs.
+    PRESENT-BUT-WRONG is the case that must not be lenient, and it fails here, at
+    boot -- a deployment whose key cannot be decoded would otherwise look healthy
+    right up until the first buyer presses Authorise.
+    """
+    keys: dict[str, bytes] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        kid, separator, seed_b64 = entry.partition(":")
+        kid, seed_b64 = kid.strip(), seed_b64.strip()
+        if not separator or not kid or not seed_b64:
+            raise ImproperlyConfigured(
+                f"MUNIM_MANDATE_KEYS entry {entry[:12]!r}... is not kid:base64seed. "
+                "Regenerate with `python manage.py mandate_keygen`."
+            )
+        try:
+            seed = base64.b64decode(seed_b64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ImproperlyConfigured(
+                f"MUNIM_MANDATE_KEYS seed for kid {kid!r} is not valid base64."
+            ) from exc
+        if len(seed) != 32:
+            raise ImproperlyConfigured(
+                f"MUNIM_MANDATE_KEYS seed for kid {kid!r} decoded to {len(seed)} "
+                "bytes; an Ed25519 seed is 32."
+            )
+        keys.setdefault(kid, seed)
+    return keys
+
+
+MANDATE_KEYS = _parse_mandate_keys(os.environ.get("MUNIM_MANDATE_KEYS", ""))
+MANDATE_ACTIVE_KID = next(iter(MANDATE_KEYS), "")
 
 CORS_ALLOW_HEADERS = ["ngrok-skip-browser-warning", "content-type", "Authorization"]
 
@@ -47,7 +110,6 @@ MAX_FILE_SIZE = 1048576
 
 ALLOWED_CSV_TYPES = {"csv": "text/csv"}
 
-# Application definition
 
 DJANGO_APPS = [
     "django.contrib.admin",
@@ -67,12 +129,19 @@ THIRD_PARTY_APPS = [
 
 LOCAL_APPS = [
     "modules.core",
+    "modules.twin",
+    "modules.ledger",
+    "modules.policy",
+    "modules.recovery",
+
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "config.middleware.DisableCSRFMiddleware",
@@ -82,6 +151,7 @@ MIDDLEWARE = [
 ]
 
 ROOT_URLCONF = "config.urls"
+ASGI_APPLICATION = "config.asgi.application"
 
 TEMPLATES = [
     {
@@ -98,27 +168,47 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = "config.wsgi.application"
+
+_db = urlparse(os.environ.get("DATABASE_URL", "postgres://munim:munim@db:5432/munim"))
 
 
-# Database
-# https://docs.djangoproject.com/en/6.0/ref/settings/#databases
+DATABASES = {"default": {
+    "ENGINE": "django.db.backends.postgresql",
+    "NAME": _db.path.lstrip("/"),
+    "USER": _db.username,
+    "PASSWORD": _db.password,
+    "HOST": _db.hostname,
+    "PORT": _db.port or 5432,
+}}
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.environ.get("POSTGRES_DB"),
-        "USER": os.environ.get("POSTGRES_USER"),
-        "PASSWORD": os.environ.get("POSTGRES_PASSWORD"),
-        "HOST": os.environ.get("POSTGRES_HOST"),
-        "PORT": os.environ.get("POSTGRES_PORT"),
-        "ATOMIC_REQUESTS": True,
-    }
+
+
+
+
+
+
+
+REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+CELERY_BROKER_URL = REDIS_URL
+CELERY_RESULT_BACKEND = REDIS_URL
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TASK_ACKS_LATE = True
+CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 60 * 60 * 24}
+CELERY_BEAT_SCHEDULE = {
+    "expire-stale-orders": {
+        "task": "modules.recovery.tasks.expire_stale_orders",
+        "schedule": 300.0,
+    },
+}
+
+STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
 }
 
 
-# Password validation
-# https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -150,8 +240,8 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 
 SPECTACULAR_SETTINGS = {
-    "TITLE": "Certifier API Documentation",
-    "DESCRIPTION": "A tool for Certificate Generation and Management",
+    "TITLE": "munim's API Documentation",
+    "DESCRIPTION": "A tool for AI payments and visibility in different AI platforms.",
     "VERSION": "0.1.0",
     "OPERATION_ID_METHOD_POSITION": "PRE",
     "SERVE_INCLUDE_SCHEMA": False,
@@ -164,19 +254,12 @@ SPECTACULAR_SETTINGS = {
     },
 }
 
-# Internationalization
-# https://docs.djangoproject.com/en/6.0/topics/i18n/
 
 LANGUAGE_CODE = "en-us"
 
-TIME_ZONE = "UTC"
-
-USE_I18N = True
+TIME_ZONE = "Asia/Kolkata"
 
 USE_TZ = True
 
 
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/6.0/howto/static-files/
 
-STATIC_URL = "static/"

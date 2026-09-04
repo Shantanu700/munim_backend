@@ -1,6 +1,5 @@
 from enum import IntEnum, StrEnum
 
-# Write your enums here
 
 
 class Status(IntEnum):
@@ -8,6 +7,6 @@ class Status(IntEnum):
     UPDATED = 1
     DELETED = 2
 
-class RoleEnum(StrEnum):
-    EMPLOYEE = "employee"
-    HR = "hr"
+class RoleEnum(IntEnum):
+    BUYER = 0
+    MERCHANT = 1

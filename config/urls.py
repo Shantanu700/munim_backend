@@ -44,4 +44,32 @@ urlpatterns = [
         "core/",
         include("modules.core.api.v1.urls"),
     ),
+    path(
+        "audit/",
+        include("modules.ledger.api.v1.urls"),
+    ),
+    path(
+        "webhooks/",
+        include("modules.twin.api.v1.urls"),
+    ),
+    path(
+        "ingest/",
+        include("modules.twin.urls_ingest"),
+    ),
+    path(
+        "policy/",
+        include("modules.policy.api.v1.urls"),
+    ),
+    path(
+        "buyer/",
+        include("modules.policy.api.v1.buyer_urls"),
+    ),
+    path(
+        "orders/",
+        include("modules.twin.urls_orders"),
+    ),
+    path(
+        "dashboard/",
+        include("modules.twin.urls_dashboard"),
+    ),
 ]

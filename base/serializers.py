@@ -1,4 +1,5 @@
 from typing import List, Union
+from drf_spectacular.drainage import set_override
 from rest_framework import serializers
 
 from base.model import ModelBase
@@ -6,7 +7,6 @@ from base.constants import FIELDS_MAPPING
 from base.functions import getattr_recursive
 from base.types import CascaderType, DynamicKeysType
 
-# Write your serializers here
 
 
 class BaseSerializer(serializers.ModelSerializer):
@@ -17,6 +17,8 @@ class BaseSerializer(serializers.ModelSerializer):
     def __init__(self, *args, **kwargs):
         fields = kwargs.pop("fields", None)
         exclude = kwargs.pop("exclude", None)
+        component_name = kwargs.pop("component_name", None)
+        component_description = kwargs.pop("component_description", None)
 
         if fields is not None:
             allowed = set(fields).union(
@@ -31,11 +33,16 @@ class BaseSerializer(serializers.ModelSerializer):
         elif exclude is not None:
             trash = set(exclude).union(set(ModelBase.BASE_MODEL_FIELDS))
             for each in trash:
-                self.fields.pop(each)
+                self.fields.pop(each, None)
         else:
             pass
 
         super(BaseSerializer, self).__init__(*args, **kwargs)
+
+        if component_name:
+            set_override(self, "component_name", component_name)
+        if component_description:
+            set_override(self, "description", component_description)
 
         for field in self.dynamic_keys:
             isDict = isinstance(field, dict)
@@ -43,7 +50,6 @@ class BaseSerializer(serializers.ModelSerializer):
                 (
                     "int"
                     if field.get("source").split(".")[-1] == "id"
-                    # or field.get("type") == "int"
                     else field.get("type", "str")
                 )
                 if isDict

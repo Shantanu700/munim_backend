@@ -3,7 +3,6 @@ from django.contrib.auth.models import UserManager as OGUserManager
 
 from base.enums import Status
 
-# Write your managers here
 
 
 class DeleteStatusManager(Manager):

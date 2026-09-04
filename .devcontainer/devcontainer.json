@@ -1,12 +1,12 @@
 // For format details, see https://aka.ms/devcontainer.json. For config options, see the
 // README at: https://github.com/devcontainers/templates/tree/main/src/docker-existing-docker-compose
 {
-	"name": "Certifer Reloaded Backend (Django 6, Python 3.13)",
+	"name": "Munim Backend (Django 6, Python 3.12)",
 	"dockerComposeFile": [
-		"../docker/nonprod/docker-compose.yaml"
+		"../docker/nonprod/docker-compose.yml"
 	],
-	"service": "certifier_django",
-	"workspaceFolder": "/backend",
+	"service": "web",
+	"workspaceFolder": "/app",
 	"customizations": {
 		"vscode": {
 			"extensions": [
@@ -16,10 +16,12 @@
 				"njpwerner.autodocstring",
 				"eamodio.gitlens",
 				"ms-azuretools.vscode-docker",
-				"charliermarsh.ruff"
+				"charliermarsh.ruff",
+				"Anthropic.claude-code"
 			],
 			"settings": {
 				"python.defaultInterpreterPath": "/usr/local/bin/python",
+				"python.testing.pytestEnabled": true,
 				"terminal.integrated.profiles.linux": {
 					"zsh": {
 						"path": "/usr/bin/zsh"

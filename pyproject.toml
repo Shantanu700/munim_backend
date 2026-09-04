@@ -5,13 +5,35 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "django>=6.0.3",
+    "django>=6.1",
+    "djangorestframework>=3.18.0",
     "django-cors-headers>=4.9.0",
     "django-sslserver-v2>=1.0",
-    "djangorestframework>=3.16.1",
     "drf-spectacular>=0.29.0",
-    "psycopg2-binary>=2.9.11",
-    "pydantic>=2.12.5",
-    "python-dotenv>=1.2.2",
+    "celery>=5.6.3",
+    "redis>=8.1.0",
+    "psycopg[binary]>=3.3.4",
+    "pynacl>=1.6.2",
+    # Fernet, for the encrypted Merchant credential columns (base/fields.py). Already
+    # present transitively; pinned explicitly because a security-relevant import
+    # should not depend on someone else's dependency tree keeping it around.
+    "cryptography>=45.0",
+    "uvicorn>=0.52.4",
+    "python-dotenv>=1.2.3",
+    "whitenoise>=6.12.0",
     "uuid6>=2025.0.1",
+    "mcp[cli]>=2.1.1",
+    "google-auth>=2.0",
+    "requests>=2.32",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-django>=4.14.0",
+]
+
+[tool.pytest.ini_options]
+# Without this every test module dies at collection on ImproperlyConfigured, since
+# there is no conftest.py to configure Django first.
+DJANGO_SETTINGS_MODULE = "config.settings"

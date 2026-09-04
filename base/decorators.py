@@ -6,12 +6,13 @@ from rest_framework.settings import api_settings
 
 from base.constants import STATUS_MAPPING
 from base.exceptions import CustomError, SerializerError
-from base.permissions import APIAuthenticationPermission
+from base.permissions import APIAuthenticationPermission, IsMerchantPermission
 from base.serializers import FileObjectSerializer
 from base.types import (
     CustomErrorResponseType,
     SerializerErrorResponseType,
     UnAuthenticatedResponseType,
+    UnAuthorizedResponseType,
 )
 
 
@@ -103,18 +104,23 @@ def extend_base_schema(cls, handler):
     else:
         extend_schema_params["auth"] = []
 
-    # mimic the behavior of extend_schema
-    # see drf_spectacular.utils.extend_schema
+    if IsMerchantPermission in getattr(cls, "permission_classes", []):
+        responses.update(
+            {
+                IsMerchantPermission.code: OpenApiResponse(
+                    UnAuthorizedResponseType,
+                    "Raised when the caller is authenticated but owns no store",
+                ),
+            }
+        )
+
     BaseSchema = (
-        # explicit manually set schema or previous view annotation
         getattr(handler, "schema", None)
-        # previously set schema with @extend_schema on views methods
         or getattr(handler, "kwargs", {}).get("schema", None)
-        # the default
         or api_settings.DEFAULT_SCHEMA_CLASS
     )
 
-    class ExtendedSchema(BaseSchema):  # type: ignore
+    class ExtendedSchema(BaseSchema): 
         def get_response_serializers(self):
             _responses = super().get_response_serializers() or {}
             _responses.update(responses)
@@ -136,4 +142,4 @@ def copy_serializer(name: str, Base: type[Serializer], **kwargs) -> Serializer:
     :param kwargs: optional kwargs for serializer initialization
     """
     serializer_class = type(name, (Base,), {})
-    return serializer_class(**kwargs)  # type: ignore
+    return serializer_class(**kwargs)

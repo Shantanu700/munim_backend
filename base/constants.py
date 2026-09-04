@@ -1,6 +1,5 @@
 from rest_framework import status
 
-# Write your status here
 
 STATUS_MAPPING = {
     "get": status.HTTP_200_OK,

@@ -13,7 +13,6 @@ from base.permissions import APIAuthenticationPermission
 from base.types import AuthenticationMethodTypes
 
 
-# Write your views here
 
 
 class BaseAV(APIView):

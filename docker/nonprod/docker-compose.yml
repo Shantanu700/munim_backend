@@ -1,0 +1,62 @@
+# Development stack.  Run from the repo root:
+#   docker compose -f docker/nonprod/docker-compose.yml up
+name: munim-dev
+
+x-app: &app
+  build:
+    context: ../..
+    dockerfile: docker/nonprod/Dockerfile
+    args:
+      # Matches the host user so files written into the bind mount are not
+      # left root-owned on the laptop.
+      USER: ${USER:-munim}
+  # One image for web/worker/beat; without this each service builds its own and
+  # they drift out of sync.
+  image: munim:dev
+  env_file: ../../.env
+  environment:
+    DJANGO_DEBUG: "1"
+    DATABASE_URL: postgres://munim:munim@db:5432/munim
+    REDIS_URL: redis://redis:6379/0
+  volumes:
+    - ../..:/app 
+    - ${HOME}/.ssh:/home/${USER}/.ssh         # live code, no rebuild on edit
+  depends_on:
+    db: {condition: service_healthy}
+    redis: {condition: service_started}
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: munim
+      POSTGRES_PASSWORD: munim
+      POSTGRES_DB: munim
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U munim"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    # Published for psql from the laptop. 5432/5433 are taken by other stacks.
+    ports: ["5434:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6381:6379"]   # 6379/6380 taken by other stacks
+
+  web:
+    <<: *app
+    command: /bin/sh -c "while sleep 1000; do :; done"
+    ports: ["${WEB_PORT:-8000}:8000"]
+
+  worker:
+    <<: *app
+    command: celery -A config worker -l info --concurrency 2
+
+  beat:
+    <<: *app
+    command: celery -A config beat -l info
+
+volumes:
+  pgdata:

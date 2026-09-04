@@ -6,12 +6,45 @@ dist/
 wheels/
 *.egg-info
 
-**/migrations/** 
-!**/migrations/__init__.py 
-
+**/migrations/**
+!**/migrations/__init__.py
 
 # Virtual environments
 .venv
 .env
+!.env.example
 
 media/
+staticfiles/
+
+# Databases
+*.sqlite3
+*.sqlite3-journal
+
+# Celery beat schedule (runtime state)
+celerybeat-schedule
+celerybeat-schedule-shm
+celerybeat-schedule-wal
+
+# Local TLS certs
+certs/
+
+# Logs and local data
+*.log
+events.jsonl
+dummy_php_store/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Tests
+tests/

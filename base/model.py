@@ -20,7 +20,7 @@ class ModelBase(models.Model):
     updated_at = models.DateTimeField(auto_now_add=True)
 
     objects = DeleteStatusManager()
-
+    unfiltered_objects = models.Manager()
     class Meta:
         abstract = True
 

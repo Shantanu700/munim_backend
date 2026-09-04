@@ -13,9 +13,9 @@ def exception_handler(exc, context):
     if isinstance(exc, APIException):
         headers = {}
         if getattr(exc, "auth_header", None):
-            headers["WWW-Authenticate"] = exc.auth_header # type: ignore
+            headers["WWW-Authenticate"] = exc.auth_header 
         if getattr(exc, "wait", None):
-            headers["Retry-After"] = "%d" % exc.wait # type: ignore
+            headers["Retry-After"] = "%d" % exc.wait 
 
         if isinstance(exc.detail, (list, dict)):
             data = exc.detail

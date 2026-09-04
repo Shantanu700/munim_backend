@@ -6,7 +6,6 @@ def recursive_parent_list(instance, field="id", parent="parent"):
         return []
     result = recursive_parent_list(getattr(instance, parent), field)
     result.append(model_to_dict(instance)[field])
-    # print(result)
     return result
 
 
