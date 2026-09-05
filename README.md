@@ -18,6 +18,13 @@ now.
 > still carries a placeholder package name (`certifier-reloaded`) from the
 > project template — that's cosmetic and safe to rename.
 
+### Repositories
+
+| Repo | What it is |
+|---|---|
+| [`munim_backend`](https://github.com/Shantanu700/munim_backend) | This repo — Django/DRF API, MCP server, policy engine, ledger |
+| [`munim_frontend`](https://github.com/Shantanu700/munim_frontend) | The merchant & buyer dashboard UI that talks to this API |
+
 ---
 
 ## 1. Architecture at a glance
