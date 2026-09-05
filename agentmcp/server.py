@@ -7,23 +7,30 @@ import logging
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
+from django.utils import timezone
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 from agentmcp import auth, catalog
 from agentmcp import checkout as checkout_core
+from agentmcp import orders as orders_core
 from agentmcp.clients import identify
 from agentmcp.schemas import (
     CheckoutResult,
     MerchantOut,
     MerchantResult,
     MultiSearchResult,
+    OrderDetailOut,
+    OrderListResult,
+    OrderOut,
+    PaymentAttemptOut,
     ProductOut,
     SearchResult,
 )
+from modules.policy.reasons import ReasonCode, Verdict
 from modules.twin.choices import CatalogReadTool
-from modules.twin.models import CatalogRead
+from modules.twin.models import CatalogRead, Order, Payment
 
 log = logging.getLogger(__name__)
 
@@ -290,6 +297,173 @@ async def checkout(
             quantity=quantity, quoted_price_paise=quoted_price_paise,
             llm_client=label, llm_client_raw=raw,
         )
+        return CheckoutResult(
+            verdict=outcome.verdict, reason_code=outcome.reason_code,
+            message=outcome.message, payment_url=outcome.payment_url,
+            approval_url=outcome.approval_url, amount_paise=outcome.amount_paise,
+            live_price_paise=outcome.live_price_paise, sku=outcome.sku,
+            title=outcome.title, ledger_seq=outcome.ledger_seq,
+        )
+
+    try:
+        return await _threaded(_run)
+    except (catalog.CatalogError, auth.AuthError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def _retry_state(order):
+    """(retryable, why_not) for one order, without minting anything.
+
+    Runs the same check_retryable the retry path runs, so get_payment_status
+    cannot promise a retry that retry_payment would then refuse. The mandate arm
+    of that check needs a token, which a plain read does not have -- so this
+    asks only the order-shaped questions and lets retry_payment be the authority
+    on the rest.
+    """
+    if order.status == Order.Status.PAID:
+        return False, ReasonCode.ORDER_ALREADY_PAID
+    live = order.payments.filter(status=Payment.Status.PENDING).first()
+    if live is not None and live.expires_at > timezone.now():
+        return False, ReasonCode.PAYMENT_STILL_LIVE
+    if order.attempts >= checkout_core.MAX_PAYMENT_ATTEMPTS:
+        return False, ReasonCode.RETRY_LIMIT_REACHED
+    return True, ""
+
+
+@mcp.tool()
+async def list_orders(
+    ctx: Context,
+    mandate: str,
+    status: str | None = None,
+    limit: int = 20,
+    merchant: str | None = None,
+) -> OrderListResult:
+    """What this buyer has ordered from this store, and what it cost.
+
+    Pass the same `mandate` token the buyer issued you for checkout. It is the
+    only thing that says who you are shopping for, so there is no way to list
+    orders without one.
+
+    Shows every order this buyer placed on this store, including ones bought
+    under an earlier mandate -- mandates are short-lived, spending history is
+    not. Filter with `status`: pending (a payment link is out and unpaid), paid,
+    failed, or expired.
+
+    `status` is the order's, derived from all of its payment links rather than
+    the newest one, so an order stays paid even when an older link of its own
+    later expires. To see the individual attempts, call get_payment_status.
+    """
+    label, _raw = identify(ctx.headers)
+
+    def _run():
+        tenant = _resolve_tenant_for_call(ctx, merchant)
+        rows = orders_core.list_for_buyer(tenant, mandate, status=status, limit=limit)
+        paid = sum(o.amount_paise for o in rows if o.status == Order.Status.PAID)
+        return OrderListResult(
+            merchant=tenant.domain,
+            count=len(rows),
+            orders=[OrderOut.of(o) for o in rows],
+            total_paid=f"{paid / 100:.2f}",
+            total_paid_paise=paid,
+        )
+
+    try:
+        return await _threaded(_run)
+    except (catalog.CatalogError, auth.AuthError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+async def get_payment_status(
+    ctx: Context,
+    mandate: str,
+    order_number: str,
+    merchant: str | None = None,
+) -> OrderDetailOut:
+    """One order, with every payment link it has had and how each one ended.
+
+    `order_number` is what checkout and list_orders give you, like "MNM-0041".
+    Pass the buyer's `mandate` as well; it is what identifies whose order it is.
+
+    An order can have more than one payment link -- the first may have expired
+    or been declined and a retry issued another. `payments` lists them oldest
+    first, so `attempt` 1 is the original. Only a link whose status is pending
+    is worth showing anyone; the rest are history.
+
+    Read `retryable` before offering the buyer a retry, and `retry_blocked_reason`
+    when it is false: PAYMENT_STILL_LIVE means an unexpired link already exists
+    and you should hand them that instead of making another.
+    """
+    label, _raw = identify(ctx.headers)
+
+    def _run():
+        tenant = _resolve_tenant_for_call(ctx, merchant)
+        order = orders_core.get_for_buyer(tenant, mandate, order_number)
+        retryable, blocked = _retry_state(order)
+        return OrderDetailOut(
+            order=OrderOut.of(order),
+            payments=[PaymentAttemptOut.of(p)
+                      for p in order.payments.order_by("attempt")],
+            retryable=retryable,
+            retry_blocked_reason=blocked,
+        )
+
+    try:
+        return await _threaded(_run)
+    except (catalog.CatalogError, auth.AuthError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+async def retry_payment(
+    ctx: Context,
+    mandate: str,
+    order_number: str,
+    merchant: str | None = None,
+) -> CheckoutResult:
+    """Get a fresh payment link for an order whose last one expired or failed.
+
+    Use this instead of calling checkout again. Checkout would create a SECOND
+    order for the same purchase; this attaches a new link to the order the buyer
+    already has, so the order number stays the same and their spending is only
+    counted once.
+
+    This is a real checkout, not a replay. The live product page is re-read and
+    the store's rules are re-applied, because the price, the stock, the mandate's
+    remaining budget and the store's own settings can all have moved since the
+    first attempt. So act on the verdict exactly as you would for checkout:
+
+    - ALLOW: `payment_url` is the new link. Give it to the buyer.
+    - PRICE_CHANGED with verdict DENY: the price moved. Tell the buyer the new
+      price and call checkout (not this) with `quoted_price_paise` set to
+      `live_price_paise`.
+    - STEP_UP: a human has to approve it. Show `approval_url` and wait.
+    - PAYMENT_STILL_LIVE: nothing was wrong -- there is already a good link, and
+      `payment_url` is it. Give them that one.
+    - RETRY_TOO_SOON: wait a couple of minutes, then this will work.
+    - ORDER_ALREADY_PAID and RETRY_LIMIT_REACHED are final. Do not retry them;
+      for the second, start a new order with checkout.
+
+    The mandate must be the one the order was placed under -- a different
+    mandate cannot pay off this order, even for the same buyer.
+
+    Nothing is charged by calling this. It creates a payment link; the buyer
+    still has to pay it.
+    """
+    label, raw = identify(ctx.headers)
+
+    def _run():
+        tenant = _resolve_tenant_for_call(ctx, merchant)
+        order = orders_core.get_retryable(tenant, mandate, order_number)
+        try:
+            outcome = checkout_core.retry_payment(
+                order, mandate, llm_client=label, llm_client_raw=raw)
+        except checkout_core.RetryRefused as refusal:
+            return CheckoutResult(
+                verdict=Verdict.DENY, reason_code=refusal.reason_code,
+                message=refusal.message, payment_url=refusal.payment_url,
+                amount_paise=order.amount_paise, sku=order.sku, title=order.title,
+            )
         return CheckoutResult(
             verdict=outcome.verdict, reason_code=outcome.reason_code,
             message=outcome.message, payment_url=outcome.payment_url,

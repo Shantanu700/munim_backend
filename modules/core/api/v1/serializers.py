@@ -17,7 +17,6 @@ from modules.core.models import (
 )
 
 
-
 class DropDownSerializer(BaseSerializer):
     key = serializers.SerializerMethodField()
     class Meta:
@@ -28,11 +27,22 @@ class DropDownSerializer(BaseSerializer):
         return slugify(obj.label)
 
 class MerchantCategorySerializer(BaseSerializer):
-    "One of a store's own categories, as its dropdowns render it"
+    """One of a store's own categories, as its dropdowns render it.
+
+    `key` is derived from the name when the stored column is empty. The column
+    is nullable and only filled by the crawler, so a row written any other way
+    -- a fixture, the admin, a category whose name slugified to nothing -- would
+    otherwise hand the dropdown a null where it expects a value to send back.
+    """
+
+    key = serializers.SerializerMethodField()
 
     class Meta:
         model = MerchantCategory
         fields = ("uuid", "key", "name")
+
+    def get_key(self, obj) -> str:
+        return obj.key or slugify(obj.name)[:255]
 
 
 class MerchantDropdownSerializer(BaseSerializer):

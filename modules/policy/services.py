@@ -34,6 +34,7 @@ from modules.policy.models import Mandate, PolicyRule, StorePolicy
 from modules.policy.registry import REGISTRY, all_specs
 from modules.policy.reasons import Verdict
 from modules.twin.orders import Order
+from modules.twin.payments import Payment
 
 POLICY_CHANGE = "policy_change"
 
@@ -96,13 +97,35 @@ def day_spent_paise(merchant, since=None) -> int:
     modules/recovery/tasks.py to drain abandoned links, or the cap ratchets
     shut on the merchant.
 
+    Windowed on when a payment LINK was minted, not on when the order was first
+    authorised. Those were the same thing until an order could have more than
+    one attempt; now a retry mints a fresh payable link today against an order
+    authorised yesterday, and authorized_at deliberately never moves. Keying on
+    it would let that link commit the store to real money while counting zero
+    against the cap -- park orders on one day, retry them the next, and the
+    day's exposure is the cap plus however much was parked.
+
+    The subquery is not stylistic. Written as the join it looks like --
+    filter(payments__requested_at__gte=...).distinct() -- Postgres returns one
+    row per matching payment, and Sum then counts an order with two links in
+    the window twice. distinct() cannot fix that: it de-duplicates rows, and
+    the rows genuinely differ. Collecting order ids first and summing each
+    order once is the whole point.
+
+    An order stays counted on every day it has a live link, which is the honest
+    reading: the store is exposed to it on each of those days.
+
     ponytail: advisory under concurrency. Simultaneous checkouts each read this
     same total and each pass. Reserve inside the Order create transaction if
     that ever matters more than the simplicity does.
     """
+    window_start = since or day_start()
+    active = (Payment.objects
+              .filter(tenant=merchant, requested_at__gte=window_start)
+              .values("order_id"))
     return Order.objects.filter(
         tenant=merchant,
-        authorized_at__gte=since or day_start(),
+        id__in=active,
         status__in=(Order.Status.PENDING, Order.Status.PAID),
     ).aggregate(total=Coalesce(Sum("amount_paise"), 0))["total"]
 

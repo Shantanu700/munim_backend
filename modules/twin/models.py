@@ -208,3 +208,7 @@ class IngestJob(TenantScoped):
 
 
 from modules.twin.orders import Order
+from modules.twin.payments import Payment
+
+__all__ = ["CatalogRead", "Event", "IngestJob", "Order", "Payment", "Product",
+           "WebhookHit"]

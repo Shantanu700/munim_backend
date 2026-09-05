@@ -69,6 +69,10 @@ urlpatterns = [
         include("modules.twin.urls_orders"),
     ),
     path(
+        "payments/",
+        include("modules.twin.urls_payments"),
+    ),
+    path(
         "dashboard/",
         include("modules.twin.urls_dashboard"),
     ),

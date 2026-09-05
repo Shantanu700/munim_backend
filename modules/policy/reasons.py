@@ -64,6 +64,11 @@ class ReasonCode(models.TextChoices):
     LINK_CANCELLED = "LINK_CANCELLED"
     PAYMENT_ATTEMPT_FAILED = "PAYMENT_ATTEMPT_FAILED"
 
+    ORDER_ALREADY_PAID = "ORDER_ALREADY_PAID"
+    PAYMENT_STILL_LIVE = "PAYMENT_STILL_LIVE"
+    RETRY_LIMIT_REACHED = "RETRY_LIMIT_REACHED"
+    RETRY_TOO_SOON = "RETRY_TOO_SOON"
+
     ALLOWED = "ALLOWED"
 
 
@@ -117,6 +122,15 @@ DESCRIPTIONS: dict[str, str] = {
     ReasonCode.PAYMENT_ATTEMPT_FAILED: "The buyer tried to pay and the payment was "
                                        "declined, then the link ran out. Worth a look -- "
                                        "they wanted this order.",
+    ReasonCode.ORDER_ALREADY_PAID: "This order has already been paid, so there is "
+                                   "nothing left to collect. A second link would be a "
+                                   "second charge.",
+    ReasonCode.PAYMENT_STILL_LIVE: "This order already has a payment link that has not "
+                                   "run out yet. Use that one rather than making another.",
+    ReasonCode.RETRY_LIMIT_REACHED: "This order has had as many payment links as it is "
+                                    "allowed. Start a fresh order instead.",
+    ReasonCode.RETRY_TOO_SOON: "The last payment link on this order closed moments ago. "
+                               "Wait a little before making another.",
     ReasonCode.ALLOWED: "Every check passed and the purchase went through.",
 }
 

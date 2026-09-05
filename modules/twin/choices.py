@@ -2,10 +2,20 @@ from django.db import models
 
 
 class IngestJobStatus(models.IntegerChoices):
+    """PENDING and RUNNING are the two live states; the rest are terminal.
+
+    CANCELLED is terminal but deliberately not FAILED: a merchant who stopped a
+    crawl themselves should not be shown an error, and the counters the run
+    reached before they stopped it are real -- the products it had already
+    ingested stay in the catalogue. Everything that asks "is an ingestion in
+    flight" filters on {PENDING, RUNNING}, so a cancelled job stops blocking the
+    next POST /ingest the moment it is cancelled.
+    """
     PENDING = 1, "Pending"
     RUNNING = 2, "Running"
     SUCCEEDED = 3, "Succeeded"
     FAILED = 4, "Failed"
+    CANCELLED = 5, "Cancelled"
 
 
 class WebhookHitOutcome(models.IntegerChoices):

@@ -165,9 +165,6 @@ class MerchantCategoryListAV(BaseAV):
     a 404, matching MasterDropdownAV: "not crawled yet" is a legitimate answer,
     and only a UUID naming no store is a wrong request.
     """
-
-    authentication = False
-
     @extend_response(MerchantCategorySerializer(many=True))
     def get(self, request, merchant_uuid):
         tenant = Merchant.objects.filter(uuid=merchant_uuid).first()

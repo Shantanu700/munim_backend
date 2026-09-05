@@ -110,6 +110,8 @@ class Order(TenantScoped):
     failed_attempts = models.PositiveIntegerField(default=0)
     last_failure_at = models.DateTimeField(null=True, blank=True)
 
+    attempts = models.PositiveSmallIntegerField(default=0)
+
     failure_reason_code = models.CharField(max_length=64, blank=True)
 
     authorized_at = models.DateTimeField(default=timezone.now, editable=False, db_index=True)

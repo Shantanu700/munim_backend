@@ -31,6 +31,14 @@ class KeysetPagination:
     Deliberately not a DRF BasePagination subclass: the views here build their
     own envelope (see `envelope`) because `total` is conditional in a way DRF's
     paginate/get_paginated_response split has nowhere to express.
+
+    `timestamp_field` is the one knob because the column a model orders time by
+    is model-specific and everything else here is not: Order has authorized_at,
+    Payment has requested_at, and neither can use ModelBase.created_at, which is
+    declared auto_now and so moves on every save. Subclass and name the column;
+    ordering, the cursor's payload and the filter all follow from it, which is
+    the point -- the three were literals in three places, and a subclass that
+    changed one of them and not the others would page silently wrong.
     """
 
     page_size = 20
@@ -38,7 +46,11 @@ class KeysetPagination:
     cursor_query_param = "cursor"
     page_size_query_param = "page_size"
 
-    ordering = ("-authorized_at", "-id")
+    timestamp_field = "authorized_at"
+
+    @property
+    def ordering(self):
+        return (f"-{self.timestamp_field}", "-id")
 
     def get_page_size(self, request) -> int:
         raw = request.query_params.get(self.page_size_query_param)
@@ -51,7 +63,8 @@ class KeysetPagination:
         return max(1, min(size, self.max_page_size))
 
     def encode(self, obj) -> str:
-        raw = f"{obj.authorized_at.isoformat()}|{obj.pk}".encode()
+        when = getattr(obj, self.timestamp_field)
+        raw = f"{when.isoformat()}|{obj.pk}".encode()
         return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
     def decode(self, raw: str | None):
@@ -85,8 +98,10 @@ class KeysetPagination:
 
         if position := self.decode(request.query_params.get(self.cursor_query_param)):
             when, pk = position
+            field = self.timestamp_field
             queryset = queryset.filter(
-                Q(authorized_at__lt=when) | Q(authorized_at=when, pk__lt=pk))
+                Q(**{f"{field}__lt": when})
+                | Q(**{field: when, "pk__lt": pk}))
 
         rows = list(queryset[:size + 1])
         has_more = len(rows) > size

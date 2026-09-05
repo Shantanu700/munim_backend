@@ -15,6 +15,7 @@ from rest_framework.response import Response
 
 from base.decorators import extend_response
 from base.enums import Status
+from base.exceptions import PermissionException
 from base.pagination import DefaultPagination
 from base.permissions import APIAuthenticationPermission, IsMerchantPermission
 from base.views import BaseAV
@@ -23,6 +24,7 @@ from modules.ledger.models import LedgerEntry
 from modules.policy.models import Mandate
 from modules.policy.reasons import ReasonCode, Verdict
 from modules.twin.api.v1.serializers import (
+    IngestCancelResponseSerializer,
     IngestRequestSerializer,
     IngestResponseSerializer,
     IngestStateSerializer,
@@ -37,6 +39,8 @@ from modules.twin.api.v1.serializers import (
 from modules.twin.choices import IngestJobStatus, WebhookHitOutcome
 from modules.twin.models import Event, IngestJob, Product, WebhookHit
 from modules.twin.orders import Order
+from modules.twin.payments import Payment, reproject
+from modules.twin.pubsub import publish_job_status
 from modules.twin.tasks import run_ingest_job
 
 log = logging.getLogger(__name__)
@@ -44,8 +48,8 @@ log = logging.getLogger(__name__)
 SPEND_EVENT = "payment_link.paid"
 
 TERMINAL_EVENTS = {
-    "payment_link.expired": Order.Status.EXPIRED,
-    "payment_link.cancelled": Order.Status.FAILED,
+    "payment_link.expired": Payment.Status.EXPIRED,
+    "payment_link.cancelled": Payment.Status.FAILED,
 }
 
 ATTEMPT_FAILED_EVENT = "payment.failed"
@@ -108,21 +112,26 @@ def _record_spend(tenant, body: dict) -> None:
 
     mandate.record_spend(paid)
 
-    plink_id = entity.get("id", "")
-    if plink_id:
-        Order.objects.filter(tenant=tenant, plink_id=plink_id).exclude(
-            status=Order.Status.PAID).update(
-            status=Order.Status.PAID, paid_at=timezone.now())
+    payment = _find_payment(tenant, body)
+    if payment is not None:
+        now = timezone.now()
+        Payment.objects.filter(pk=payment.pk).exclude(
+            status=Payment.Status.PAID).update(
+            status=Payment.Status.PAID, paid_at=now, closed_at=now,
+            amount_paid_paise=paid)
+        reproject(payment.order)
+
     LedgerEntry.append(
         tenant=tenant, action="payment_confirmed", decision="ALLOW", reason_code="PAID",
         detail={"mandate_jti": str(jti), "amount_paise": paid,
-                "plink_id": entity.get("id", ""), "spent_paise": mandate.spent_paise},
+                "plink_id": entity.get("id", ""), "spent_paise": mandate.spent_paise,
+                "attempt": payment.attempt if payment else None},
     )
     log.info("mandate %s spent now %s paise", jti, mandate.spent_paise)
 
 
-def _find_order(tenant, body: dict):
-    """The order an event belongs to.
+def _find_payment(tenant, body: dict):
+    """The payment ATTEMPT an event belongs to.
 
     Two routes, because the events do not agree on what they carry. A
     payment_link.* event carries the link entity, so plink_id resolves it. A
@@ -131,48 +140,71 @@ def _find_order(tenant, body: dict):
     creation (munim_ref -- see agentmcp/checkout._link_for). Links created
     before that note existed are unresolvable by the second route, which is why
     callers have to tolerate None.
+
+    Resolves to a Payment rather than an Order because an order now has more
+    than one link, and Order.plink_id is only the LATEST of them. Looking an
+    event up there would answer the wrong attempt as soon as anyone retried --
+    and for a payment_link.expired belonging to a superseded link, that is the
+    difference between recording that one link lapsed and cancelling a sale.
+
+    Unlike the Order-level lookup this replaces, both handles are unique per
+    tenant at the database level (uniq_payment_plink_per_tenant,
+    uniq_payment_reference_per_tenant), so "the first row that matched" is now
+    "the row that matched".
     """
     entity = (body.get("payload") or {}).get("payment_link", {}).get("entity", {})
+    rows = Payment.objects.filter(tenant=tenant).select_related("order")
     if plink_id := entity.get("id", ""):
-        if order := Order.objects.filter(tenant=tenant, plink_id=plink_id).first():
-            return order
-    if reference_id := _notes(body).get("munim_ref"):
-        return Order.objects.filter(tenant=tenant, reference_id=reference_id).first()
+        if found := rows.filter(plink_id=plink_id).first():
+            return found
+    if reference_id := (entity.get("reference_id") or _notes(body).get("munim_ref")):
+        return rows.filter(reference_id=reference_id).first()
     return None
 
 
-def _close_order(tenant, body: dict, new_status: str) -> None:
-    """End an order's life, because Razorpay says the link is done.
+def _close_payment(tenant, body: dict, new_status: str) -> None:
+    """End one LINK's life, because Razorpay says it is done.
 
-    Only ever moves a PENDING row. That is what makes it idempotent against
-    redelivery, and it is also what stops an `expired` arriving after a `paid`
-    from overwriting a sale -- an ordering Razorpay does not promise.
+    The idempotency guard moved down a level, from the order to the attempt, and
+    that is the whole point of the split. Attempt 1 genuinely expired and its
+    row must say so whatever attempt 2 went on to do; what must not be
+    overwritten is the ORDER, and reproject() is what protects that -- it
+    recomputes from every attempt, so a paid or still-live sibling outranks this
+    closure and the order does not move.
+
+    Filtering on PENDING here is still what makes redelivery a no-op, exactly as
+    it was when this filtered orders.
     """
-    order = _find_order(tenant, body)
-    if order is None:
-        log.warning("razorpay %s: no order matched on %s",
+    payment = _find_payment(tenant, body)
+    if payment is None:
+        log.warning("razorpay %s: no payment matched on %s",
                     body.get("event"), tenant.domain)
         return
 
-    if new_status == Order.Status.EXPIRED and order.failed_attempts:
+    if new_status == Payment.Status.EXPIRED and payment.failed_attempts:
         reason = ReasonCode.PAYMENT_ATTEMPT_FAILED
-    elif new_status == Order.Status.EXPIRED:
+    elif new_status == Payment.Status.EXPIRED:
         reason = ReasonCode.LINK_EXPIRED
     else:
         reason = ReasonCode.LINK_CANCELLED
 
-    moved = Order.objects.filter(pk=order.pk, status=Order.Status.PENDING).update(
-        status=new_status, failure_reason_code=reason)
+    moved = Payment.objects.filter(pk=payment.pk,
+                                   status=Payment.Status.PENDING).update(
+        status=new_status, failure_reason_code=reason, closed_at=timezone.now())
     if not moved:
-        log.info("razorpay %s: order %s already %s",
-                 body.get("event"), order.order_number, order.status)
+        log.info("razorpay %s: attempt %s of order %s already %s",
+                 body.get("event"), payment.attempt,
+                 payment.order.order_number, payment.status)
         return
+
+    reproject(payment.order)
 
     LedgerEntry.append(
         tenant=tenant, action="payment_link_closed", decision=Verdict.DENY,
         reason_code=reason,
-        detail={"order_number": order.order_number, "plink_id": order.plink_id,
-                "amount_paise": order.amount_paise, "status": new_status},
+        detail={"order_number": payment.order.order_number,
+                "plink_id": payment.plink_id, "attempt": payment.attempt,
+                "amount_paise": payment.amount_paise, "status": new_status},
     )
 
 
@@ -185,20 +217,25 @@ def _record_failed_attempt(tenant, body: dict) -> None:
     not pay" from "nobody tried at all" -- the two halves of Needs attention,
     which want different things from the merchant.
     """
-    order = _find_order(tenant, body)
-    if order is None:
-        log.info("razorpay payment.failed: no order matched on %s", tenant.domain)
+    payment = _find_payment(tenant, body)
+    if payment is None:
+        log.info("razorpay payment.failed: no payment matched on %s", tenant.domain)
         return
 
-    Order.objects.filter(pk=order.pk).update(
-        failed_attempts=F("failed_attempts") + 1, last_failure_at=timezone.now())
+    with transaction.atomic():
+        now = timezone.now()
+        Payment.objects.filter(pk=payment.pk).update(
+            failed_attempts=F("failed_attempts") + 1, last_failure_at=now)
+        Order.objects.filter(pk=payment.order_id).update(
+            failed_attempts=F("failed_attempts") + 1, last_failure_at=now)
 
     LedgerEntry.append(
         tenant=tenant, action="payment_attempt_failed", decision=Verdict.DENY,
         reason_code=ReasonCode.PAYMENT_ATTEMPT_FAILED,
-        detail={"order_number": order.order_number, "plink_id": order.plink_id,
-                "amount_paise": order.amount_paise,
-                "failed_attempts": order.failed_attempts + 1},
+        detail={"order_number": payment.order.order_number,
+                "plink_id": payment.plink_id, "attempt": payment.attempt,
+                "amount_paise": payment.amount_paise,
+                "failed_attempts": payment.order.failed_attempts + 1},
     )
 
 
@@ -333,7 +370,7 @@ class RazorpayWebhookAV(BaseAV):
             if event.event_type == SPEND_EVENT:
                 _record_spend(tenant, body)
             elif new_status := TERMINAL_EVENTS.get(event.event_type):
-                _close_order(tenant, body, new_status)
+                _close_payment(tenant, body, new_status)
             elif event.event_type == ATTEMPT_FAILED_EVENT:
                 _record_failed_attempt(tenant, body)
 
@@ -448,6 +485,68 @@ class IngestAV(BaseAV):
             "status": job.get_job_status_display().lower(),
             "webhook_url": tenant.webhook_url,
             "mcp_url": tenant.mcp_url,
+        }
+
+
+class IngestCancelAV(BaseAV):
+    """Stop an ingestion that is still fetching products.
+
+    Locked to job.created_by, the same rule as the SSE stream and for the same
+    reason -- the two are used together, so whoever may watch a run is exactly
+    whoever may end it. Cancelling ends the stream: the status write below is
+    published on the tenant channel, the open EventSource wakes, and
+    IngestStreamView emits its terminal `done` event and closes.
+
+    Idempotent, and deliberately not a 409 once the job is over. A merchant
+    presses Stop while the last few URLs are in flight, so "it finished a
+    moment before you asked" is a race the UI hits in normal use, not an error
+    worth showing them. The conditional UPDATE is what makes that race safe:
+    the database, not this process, decides whether the job was still live, so
+    this can never overwrite a `succeeded` the worker had already committed.
+    """
+
+    authentication = True
+    permission_classes = [APIAuthenticationPermission, IsMerchantPermission]
+
+    @extend_schema(
+        description=(
+            "Stop a running ingestion. The job settles on `cancelled`, its open SSE "
+            "stream closes with a final `done` event, and the products already ingested "
+            "stay in the catalogue. Safe to call twice, and safe to call on a job that "
+            "has just finished -- `cancelled` in the response says whether this call is "
+            "what stopped it."
+        ),
+        parameters=[
+            OpenApiParameter(
+                name="job_uuid", type=OpenApiTypes.UUID, location=OpenApiParameter.PATH,
+                description="The `job` uuid returned by POST /ingest/.",
+            ),
+        ],
+    )
+    @extend_response(IngestCancelResponseSerializer())
+    def post(self, request, job_uuid):
+        job = IngestJob.objects.filter(uuid=job_uuid).first()
+        if job is None:
+            return Response({"msg": "No such ingestion job."}, status=status.HTTP_404_NOT_FOUND)
+        if job.created_by_id != request.user.id:
+            raise PermissionException(detail="not your ingestion job",
+                                      code=status.HTTP_403_FORBIDDEN)
+
+        cancelled = IngestJob.objects.filter(
+            pk=job.pk, job_status__in=[IngestJobStatus.PENDING, IngestJobStatus.RUNNING],
+        ).update(job_status=IngestJobStatus.CANCELLED, finished_at=timezone.now())
+
+        job.refresh_from_db()
+        if cancelled:
+            # QuerySet.update() fires no post_save, and the receiver in
+            # signals.py is what normally feeds the stream. Announce it here or
+            # the EventSource sits on heartbeats until the client gives up.
+            publish_job_status(job)
+
+        return {
+            "job": job.uuid,
+            "status": job.get_job_status_display().lower(),
+            "cancelled": bool(cancelled),
         }
 
 

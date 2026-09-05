@@ -247,3 +247,85 @@ def search_q(tenant, q: str) -> Q:
             tenant=tenant, reason_code__in=codes).values("seq"))
 
     return clause
+
+
+def buyer_search_q(q: str) -> Q:
+    """The same search box, over the BUYER's own history.
+
+    Not search_q() with the tenant argument dropped. That one reaches buyer
+    email and name, which on this surface are one buyer and so match either
+    every row or none, and plink_id and reference_id, which are the merchant's
+    Razorpay handles -- both are on buyer_order_serializers.py's never-exposed
+    list, and a field the buyer is never shown is not one they search by.
+
+    What it adds instead is the merchant's domain, because the buyer's list is
+    the one screen in the product that spans stores.
+
+    Of the three routes from a reason code to an order, only failure_reason_code
+    survives the crossing. A step-up reason and a ledger entry are the
+    merchant's record of how the decision got made; this endpoint does not show
+    them, and searching by something invisible returns rows the reader cannot
+    explain.
+
+    Takes no tenant, and must not: the caller scopes to the buyer, and every
+    clause here is a column on Order or on its own tenant row.
+    """
+    q = q.strip()[:MAX_QUERY_LENGTH]
+    number = q.upper().removeprefix("#").removeprefix("MNM-")
+
+    clause = (
+        Q(order_number__icontains=number)
+        | Q(title__icontains=q)
+        | Q(sku__icontains=q)
+        | Q(product_url__icontains=q)
+        | Q(tenant__domain__icontains=q)
+    )
+
+    if codes := reason_codes_matching(q):
+        clause |= Q(failure_reason_code__in=codes)
+
+    return clause
+
+
+def payment_search_q(q: str) -> Q:
+    """The same search box, over the merchant's PAYMENT ATTEMPTS.
+
+    Not search_q() with `order__` pasted in front of every lookup. Two of its
+    clauses would land on the wrong row: plink_id and reference_id exist on both
+    models, and Order's are the projection of whichever attempt reproject() last
+    promoted -- so searching a link handle through the order would match every
+    attempt of that order, including the ones that never carried it. The whole
+    reason this endpoint exists is to tell those attempts apart, so both are
+    read off the Payment row here.
+
+    Its ledger and step-up clauses are dropped for the reason buyer_search_q
+    drops them: they are facts about how the ORDER was decided, and an order
+    that took three tries was decided once. Order.ledger_seq is that decision;
+    Payment.ledger_seq is the checkout that authorised one retry, and searching
+    a reason code has never meant "find the retry it authorised".
+
+    Buyer email and name stay, unlike buyer_search_q -- this list spans the
+    store's buyers, so they discriminate here where on the buyer's own screen
+    they match either everything or nothing.
+
+    Takes no tenant, and needs none: every clause is a column on Payment or on
+    the Order it hangs off, and the caller has already scoped to the store. The
+    icontains-is-a-sequential-scan caveat on search_q applies here too.
+    """
+    q = q.strip()[:MAX_QUERY_LENGTH]
+    number = q.upper().removeprefix("#").removeprefix("MNM-")
+
+    clause = (
+        Q(order__order_number__icontains=number)
+        | Q(order__title__icontains=q)
+        | Q(order__sku__icontains=q)
+        | Q(order__buyer__email__icontains=q)
+        | Q(order__buyer__name__icontains=q)
+        | Q(plink_id__iexact=q)
+        | Q(reference_id__iexact=q)
+    )
+
+    if codes := reason_codes_matching(q):
+        clause |= Q(failure_reason_code__in=codes)
+
+    return clause

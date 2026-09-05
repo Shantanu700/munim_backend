@@ -21,10 +21,15 @@ from modules.policy.api.v1.mandate_views import (
     BuyerMandateListCreateAV,
     BuyerMandateRevokeAV,
 )
-
+from modules.twin.api.v1.buyer_order_views import (
+    BuyerOrderDetailAV,
+    BuyerOrderListAV,
+)
 
 urlpatterns = [
     path("mandates/", BuyerMandateListCreateAV.as_view()),
     path("mandates/<uuid:mandate_uuid>/", BuyerMandateDetailAV.as_view()),
     path("mandates/<uuid:mandate_uuid>/revoke/", BuyerMandateRevokeAV.as_view()),
+    path("orders/", BuyerOrderListAV.as_view()),
+    path("orders/<uuid:order_uuid>/", BuyerOrderDetailAV.as_view()),
 ]

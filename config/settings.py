@@ -24,7 +24,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = "django-insecure-d#85asx!ojvok8yfs+f&206+2=w2i0!vxjg7zgqsy#f30&v+i$"
 
-DEBUG = True
+DEBUG = os.environ.get("DJANGO_DEBUG", "False").lower() in ("true", "1", "yes")
 
 ALLOWED_HOSTS = ["*"]
 
@@ -171,21 +171,24 @@ TEMPLATES = [
 
 _db = urlparse(os.environ.get("DATABASE_URL", "postgres://munim:munim@db:5432/munim"))
 
-
-DATABASES = {"default": {
-    "ENGINE": "django.db.backends.postgresql",
-    "NAME": _db.path.lstrip("/"),
-    "USER": _db.username,
-    "PASSWORD": _db.password,
-    "HOST": _db.hostname,
-    "PORT": _db.port or 5432,
-}}
-
-
-
-
-
-
+if DEBUG:
+    DATABASES = {"default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": _db.path.lstrip("/"),
+        "USER": _db.username,
+        "PASSWORD": _db.password,
+        "HOST": _db.hostname,
+        "PORT": _db.port or 5432,
+    }}
+else:
+    DATABASES = {"default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.environ.get("PROD_DATABASE_NAME", _db.path.lstrip("/")),
+        "USER": os.environ.get("PROD_DATABASE_USER", _db.username),
+        "PASSWORD": os.environ.get("PROD_DATABASE_PASSWORD", _db.password),
+        "HOST": os.environ.get("PROD_DATABASE_HOST", _db.hostname),
+        "PORT": os.environ.get("PROD_DATABASE_PORT", _db.port) or 5432,
+    }}
 
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")

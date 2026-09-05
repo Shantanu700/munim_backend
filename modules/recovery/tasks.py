@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from modules.policy.reasons import ReasonCode
 from modules.twin.orders import Order
+from modules.twin.payments import Payment, reproject
 
 
 @shared_task
@@ -18,7 +19,7 @@ EXPIRY_GRACE_MINUTES = 30
 
 @shared_task
 def expire_stale_orders():
-    """Flip PENDING orders past their link's life to EXPIRED.
+    """Flip payment links past their life to EXPIRED, then re-derive their orders.
 
     Order.Status.EXPIRED existed from the start and nothing ever set it, which
     was harmless while an order's status was only ever read for display. It
@@ -40,16 +41,30 @@ def expire_stale_orders():
     in their own Razorpay dashboard, so a store that never subscribed still
     needs its abandoned links drained or the daily cap ratchets shut on them.
 
-    Returns (failed, expired).
+    The unit of expiry is the LINK, not the order. A retried order is old while
+    its second link is minutes fresh, so keying on Order.authorized_at would
+    reap a live link; Payment.expires_at is absolute and per-attempt, which is
+    why it is stored rather than derived from the order's age.
+
+    Returns (failed, expired), counted in PAYMENTS. For an order that was never
+    retried -- every order that existed before this split -- that is the same
+    number it always was.
     """
-    from agentmcp.checkout import LINK_MINUTES
+    cutoff = timezone.now()
+    stale = Payment.objects.filter(status=Payment.Status.PENDING,
+                                   expires_at__lt=cutoff - timedelta(
+                                       minutes=EXPIRY_GRACE_MINUTES))
 
-    cutoff = timezone.now() - timedelta(minutes=LINK_MINUTES + EXPIRY_GRACE_MINUTES)
-    stale = Order.objects.filter(status=Order.Status.PENDING, authorized_at__lt=cutoff)
+    order_ids = list(stale.values_list("order_id", flat=True).distinct())
 
+    now = timezone.now()
     failed = stale.filter(failed_attempts__gt=0).update(
-        status=Order.Status.FAILED,
+        status=Payment.Status.FAILED, closed_at=now,
         failure_reason_code=ReasonCode.PAYMENT_ATTEMPT_FAILED)
     expired = stale.filter(failed_attempts=0).update(
-        status=Order.Status.EXPIRED, failure_reason_code=ReasonCode.LINK_EXPIRED)
+        status=Payment.Status.EXPIRED, closed_at=now,
+        failure_reason_code=ReasonCode.LINK_EXPIRED)
+
+    for order in Order.objects.filter(id__in=order_ids):
+        reproject(order)
     return failed, expired

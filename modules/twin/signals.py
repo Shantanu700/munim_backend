@@ -2,7 +2,7 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 
 from modules.twin.models import IngestJob, Product
-from modules.twin.pubsub import publish_tenant_event
+from modules.twin.pubsub import publish_job_status, publish_tenant_event
 
 
 @receiver(post_save, sender=Product)
@@ -28,13 +28,4 @@ PROGRESS_FIELDS = frozenset({"job_status", "total_urls", "processed"})
 def _on_ingest_job_saved(sender, instance: IngestJob, created, update_fields, **kwargs):
     if not update_fields or PROGRESS_FIELDS.isdisjoint(update_fields):
         return
-    publish_tenant_event(instance.tenant_id, {
-        "type": "status",
-        "status": instance.get_job_status_display().lower(),
-        "processed": instance.processed,
-        "total": instance.total_urls,
-        "created": instance.created_count,
-        "updated": instance.updated_count,
-        "skipped": instance.skipped_count,
-        "error": instance.error_message,
-    })
+    publish_job_status(instance)

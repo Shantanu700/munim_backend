@@ -119,6 +119,20 @@ class ProductListResponseSerializer(serializers.Serializer):
     results = product_list_serializer(many=True)
 
 
+class IngestCancelResponseSerializer(serializers.Serializer):
+    """The outcome of asking an ingestion to stop.
+
+    `status` is what the job settled on, which is not always `cancelled`: a run
+    that finished on its own a moment before the request keeps `succeeded`.
+    `cancelled` says whether THIS call is what stopped it, so a client can tell
+    "I stopped it" from "it was already over" without comparing timestamps.
+    """
+
+    job = serializers.UUIDField()
+    status = serializers.CharField()
+    cancelled = serializers.BooleanField()
+
+
 class IngestStateSerializer(serializers.Serializer):
     """Everything the catalogue screen needs on load, in one response.
 

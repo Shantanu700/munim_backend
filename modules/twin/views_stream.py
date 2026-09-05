@@ -14,7 +14,7 @@ from modules.twin.models import IngestJob
 from modules.twin.pubsub import get_async_client, tenant_channel
 
 HEARTBEAT_S = 15
-TERMINAL = {IngestJobStatus.SUCCEEDED, IngestJobStatus.FAILED}
+TERMINAL = {IngestJobStatus.SUCCEEDED, IngestJobStatus.FAILED, IngestJobStatus.CANCELLED}
 
 
 class EventStreamRenderer(BaseRenderer):
@@ -61,6 +61,14 @@ def _snapshot(job: IngestJob) -> dict:
 
 
 def _terminal_event(job: IngestJob) -> bytes:
+    """The last event of the stream, chosen by how the job ended.
+
+    A cancelled job closes with `done`, not `error`: the merchant stopped it on
+    purpose, and the counters in the snapshot are a true account of what was
+    ingested before they did. Clients tell the two endings apart by the
+    `status` field of the payload ("succeeded" vs "cancelled") rather than by
+    the event name, so a client that only listens for `done` still closes.
+    """
     if job.job_status == IngestJobStatus.FAILED:
         return _sse("error", {"message": job.error_message})
     return _sse("done", _snapshot(job))
@@ -103,7 +111,9 @@ class IngestStreamView(BaseAV):
             "whenever a product is newly ingested. Same shape as a row of `results` from "
             "`GET /ingest/products`, so a client renders either without telling them apart; "
             "`uuid` addresses the row for `GET /ingest/products/<uuid>` and its edit/delete.\n"
-            "- `done` -- final `progress`-shaped payload, sent once and the stream closes.\n"
+            "- `done` -- final `progress`-shaped payload, sent once and the stream closes. "
+            "Its `status` is `succeeded`, or `cancelled` if the merchant stopped the run "
+            "via `POST /ingest/<job>/cancel`.\n"
             "- `error` -- `{message}`, sent once (job failed) and the stream closes."
         ),
         parameters=[
