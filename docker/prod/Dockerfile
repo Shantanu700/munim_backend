@@ -1,6 +1,6 @@
 # Production image: multi-stage, no dev dependencies, no build tools in the
 # runtime layer, non-root, static files baked in at build time.
-FROM python:3.12-slim AS builder
+FROM python:3.13-slim AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
@@ -10,7 +10,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 
-FROM python:3.12-slim AS runtime
+FROM python:3.13-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PATH="/app/.venv/bin:$PATH"
 WORKDIR /app
