@@ -314,6 +314,38 @@ recomputes the whole chain and reports the first break, if any — exposed as
 the audit trail behind `/audit/`. A refusal you can't show an auditor isn't a
 control, so denials are recorded exactly like approvals.
 
+### Append-only is enforced by Postgres, not by convention
+
+The chain *detects* a rewrite; two triggers *refuse* it. Migration
+`ledger/0002_ledger_entry_append_only` installs `ledgerentry_no_update` and
+`ledgerentry_no_delete` on `ledger_ledgerentry`, both `BEFORE ... FOR EACH ROW`,
+both calling a function whose whole body is a `RAISE EXCEPTION`. INSERT is
+untouched, so `LedgerEntry.append()` — the only writer in the codebase — carries
+on as before, and everything else gets:
+
+```
+ERROR:  ledger_ledgerentry is append-only: UPDATE on seq 4 (tenant 2) is not permitted
+```
+
+Triggers rather than `REVOKE UPDATE, DELETE`: the app connects as the role that
+owns the table, and an owner can always grant its privileges back. A trigger
+binds the owner too. Deliberately getting past one takes `ALTER TABLE ... DISABLE
+TRIGGER` (table owner) or `session_replication_role` (superuser) — which is the
+point, since neither happens by accident.
+
+Blocking UPDATE also closes a hole the hash chain cannot see. `status` is what
+`DeleteStatusManager` filters on, and both `append()` and `verify()` read through
+`objects` — so flipping a row to `Status.DELETED` would drop it out of the chain
+walk entirely, and the rows left behind would still verify clean. That is an edit
+no amount of hashing would report, and it is now simply refused.
+
+`TRUNCATE` is deliberately *not* guarded: Django's `TransactionTestCase` teardown
+flushes every table that way, and a statement-level trigger would break the suite.
+
+The one place that still needs to tamper is the test proving `verify()` works.
+`tests/conftest.py` exposes `ledger_triggers_disabled()` for exactly that, and
+nothing else should use it.
+
 ---
 
 ## 6. Data model cheat sheet
@@ -330,7 +362,7 @@ control, so denials are recorded exactly like approvals.
 | `Mandate` | `modules.policy` | Signed (JWS) buyer authority: caps, allowed categories, validity window, accumulated spend. |
 | `StorePolicy` / `PolicyRule` | `modules.policy` | A merchant's named rule set (at most one active); each `PolicyRule` is one configurable check (`registry.py`) in `DRAFT` or `ENFORCING` state, with an `on_breach` of refuse / ask-buyer / ask-merchant. |
 | `StepUp` | `modules.policy` | A parked purchase awaiting human approval, addressed by an unguessable token. |
-| `LedgerEntry` | `modules.ledger` | Append-only, hash-chained decision log. |
+| `LedgerEntry` | `modules.ledger` | Hash-chained decision log. Append-only for real: Postgres triggers refuse every `UPDATE` and `DELETE` on the table (§5), so `LedgerEntry.append()` is the only way a row ever gets there. |
 
 ---
 
@@ -417,3 +449,35 @@ Covers the policy engine, checkout gating, mandate issuance/JWS, catalog
 reads/scoping, order lifecycle, ledger hash-chain integrity, Razorpay webhook
 tenancy/signature handling, and the MCP tool dispatch layer (dual-door
 scoping, read counting).
+
+---
+
+## 10. Going live
+
+```bash
+cp .env.example .env    # repo root; the prod compose reads ../../.env
+docker compose -f docker/prod/docker-compose.yml up -d --build
+docker compose -f docker/prod/docker-compose.yml exec web python manage.py createsuperuser
+```
+
+Migrations run once as their own `migrate` service before `web`, `worker` and
+`beat` start, so there's no manual `migrate` step.
+
+Checklist before pointing real traffic at it:
+
+- **Secrets.** Set `DJANGO_SECRET_KEY`, `POSTGRES_PASSWORD` and
+  `MUNIM_FIELD_ENCRYPTION_KEYS`; compose refuses to start without them. Also
+  set `MUNIM_MANDATE_KEYS`. Compose doesn't enforce it, so a missing key only
+  shows up when the first mandate is signed. Back up both key sets: if you lose
+  the Fernet keys, merchants have to re-enter their Razorpay credentials, and if
+  you lose the mandate keys, every issued mandate stops verifying.
+- **TLS.** Put a reverse proxy or tunnel in front of port `8000` (`WEB_PORT`)
+  to terminate HTTPS, and set `PUBLIC_HOST` to that hostname. Session cookies
+  are `Secure` + `SameSite=None`, so plain HTTP won't log anyone in.
+- **Razorpay.** Switch merchants from Test Mode to Live keys, and point each
+  webhook at `https://<PUBLIC_HOST>/webhooks/razorpay/<domain>`.
+- **Lock down origins.** `ALLOWED_HOSTS = ["*"]`, `CORS_ALLOW_ALL_ORIGINS` with
+  credentials, and the disabled CSRF middleware are dev conveniences. Restrict
+  them to your real frontend domain before launch.
+- **Health.** `web` is healthy when `/audit/verify` returns 200. Back up the
+  `pgdata` volume, since the ledger lives there.
